@@ -17,23 +17,25 @@ network ODA_MD_Network
 {
     parameters:
         int numNodes = default(3);  // 3 sensors representing Intel Lab nodes 36, 37, 38
-        @display("bgb=600,400;bgl=2");
+        @display("bgb=700,450;bgg=50,2,grey90;bgi=background/terrain,s");
     submodules:
         sink: Sink {
-            @display("p=500,200;i=device/server2");
+            @display("p=600,225;i=device/server2,gold,60;is=l");
         }
         clusterHead: ClusterHead {
-            @display("p=300,200;i=device/server");
+            @display("p=350,225;i=device/accesspoint,cyan,50;is=l");
         }
         sensor[numNodes]: SensorNode {
-            @display("p=100,100,c,100;i=misc/sensor2");
+            @display("p=100,100,c,120;i=device/palm;is=s");
         }
     connections:
         // Cluster Head -> Sink
         clusterHead.out --> sink.in;
 
-        // All Sensors -> Cluster Head
+        // Bidirectional: CH <-> Sensors
+        // CH sends requests via toSensor[], sensors respond via out->in[]
         for i=0..numNodes-1 {
-            sensor[i].out --> clusterHead.in++;
+            clusterHead.toSensor++ --> sensor[i].in;   // Request: CH -> Sensor
+            sensor[i].out --> clusterHead.in++;        // Response: Sensor -> CH
         }
 }

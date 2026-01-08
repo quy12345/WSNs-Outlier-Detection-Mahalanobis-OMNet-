@@ -43,6 +43,27 @@ Download `data.txt` (~150MB) from [Intel Lab Data](http://db.csail.mit.edu/labda
 | Sensors | 36, 37, 38 | Intel Lab nodes |
 | Time range | 2004-03-11 → 2004-03-14 | Paper |
 
+## Data Flow (New)
+
+```mermaid
+sequenceDiagram
+    participant CH as ClusterHead
+    participant S1 as Sensor[0] (Node 36)
+    participant S2 as Sensor[1] (Node 37)
+    participant S3 as Sensor[2] (Node 38)
+    
+    Note over CH: requestTimer fires (every 1s)
+    CH->>S1: RequestMsg
+    CH->>S2: RequestMsg
+    CH->>S3: RequestMsg
+    
+    S1-->>CH: SensorMsg (T,H,L,V)
+    S2-->>CH: SensorMsg (T,H,L,V)
+    S3-->>CH: SensorMsg (T,H,L,V)
+    
+    Note over CH: Buffer full → Run ODA-MD/OD
+```
+
 ## Project Structure
 
 ```text

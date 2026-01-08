@@ -1,5 +1,6 @@
 //
 // SensorNode - Reads real Intel Lab data and sends to Cluster Head
+// Request-Response pattern: responds to RequestMsg from CH (Algorithm 1 - ODA-MD paper)
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Lesser General Public License as published by
@@ -69,7 +70,6 @@ void SensorNode::initialize()
     else realMoteId = 38;
 
     // Configuration
-    sendInterval = par("sendInterval").doubleValue();
     useRealData = par("useRealData").boolValue();
 
     // Load shared data (only first sensor does this)
@@ -80,25 +80,34 @@ void SensorNode::initialize()
     // Initialize energy (2J theo Heinzelman)
     energy = EnergyModel(2.0);
 
-    // Tạo timer
-    sendTimer = new cMessage("sendTimer");
-
-    // Lên lịch gửi gói tin đầu tiên ngẫu nhiên để tránh xung đột
-    scheduleAt(simTime() + uniform(0.1, 0.5), sendTimer);
-
     EV << "SensorNode " << nodeId << " (MoteID=" << realMoteId << ") initialized.\n";
+    EV << "  [Request-Response mode: waiting for requests from CH]\n";
 }
 
+// =============================================================================
+// REQUEST-RESPONSE PATTERN (Algorithm 1 - ODA-MD Paper)
+// "When a sensor N_k receives the request req, it starts the sensing process
+//  and it will send all measured data to CH_i"
+// =============================================================================
 void SensorNode::handleMessage(cMessage *msg)
 {
-    if (msg == sendTimer) {
+    // Check if this is a request from CH
+    RequestMsg *req = dynamic_cast<RequestMsg *>(msg);
+    
+    if (req != nullptr) {
+        // Received request from CH - start sensing and respond
+        
         // Check if still have energy
         if (!energy.isAlive()) {
             EV << "SensorNode " << nodeId << " is out of energy!\n";
+            delete msg;
             return;
         }
 
-        // 1. Tạo gói tin SensorMsg
+        // Energy consumption for receiving request
+        energy.receive(64);  // 64 bits = 8 bytes control packet
+
+        // 1. Tạo gói tin SensorMsg phản hồi
         SensorMsg *sMsg = new SensorMsg("SensorData");
         sMsg->setSourceId(realMoteId);  // Use real mote ID
 
@@ -131,7 +140,7 @@ void SensorNode::handleMessage(cMessage *msg)
         sMsg->setIsOutlier(isOutlier);
 
         if (isOutlier) {
-            EV << "SensorNode " << realMoteId << " sending OUTLIER data! "
+            EV << "SensorNode " << realMoteId << " responding with OUTLIER data! "
                << "T=" << sMsg->getTemperature() << "\n";
         }
 
@@ -139,21 +148,21 @@ void SensorNode::handleMessage(cMessage *msg)
         // Packet size: 32 bytes = 256 bits, distance ~20m to CH
         energy.transmit(256, 20.0);
 
-        // 4. Gửi sang Cluster Head
+        // 4. Gửi phản hồi sang Cluster Head
         send(sMsg, "out");
 
-        // 5. Hẹn giờ cho lần gửi tiếp theo
-        scheduleAt(simTime() + sendInterval, sendTimer);
+        // Delete the request message
+        delete msg;
     }
     else {
+        // Unknown message type
+        EV << "SensorNode " << realMoteId << " received unknown message type\n";
         delete msg;
     }
 }
 
 void SensorNode::finish()
 {
-    cancelAndDelete(sendTimer);
-
     EV << "SensorNode " << realMoteId << " Energy consumed: "
        << energy.getConsumedEnergyMJ() << " mJ ("
        << (100 - energy.getEnergyPercentage()) << "% used)\n";

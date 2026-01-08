@@ -7,10 +7,10 @@ simple SensorNode
 {
     parameters:
         int nodeId = default(index);
-        double sendInterval @unit(s) = default(1s);
         bool useRealData = default(true);
         string dataFile = default("../data.txt");
-        @display("i=misc/sensor2");
+        @display("i=device/palm;is=s;tt=Intel Lab Sensor Node");
     gates:
-        output out;
+        input in;       // Receive request from CH
+        output out;     // Send data response to CH
 }

@@ -44,6 +44,12 @@ class ClusterHead : public cSimpleModule
 
     cMessage *logTimer;
     double logInterval;
+    
+    // Request-Response pattern (Algorithm 1 - ODA-MD paper)
+    cMessage *requestTimer;
+    double requestInterval;
+    int numSensors;
+    int requestId;
 
     // =========================================================================
     // OD Algorithm (Fawzy et al., 2013) - Data Structures
@@ -64,6 +70,9 @@ class ClusterHead : public cSimpleModule
     virtual void initialize() override;
     virtual void handleMessage(cMessage *msg) override;
     virtual void finish() override;
+
+    // Request-Response pattern
+    void sendDataRequest();
 
     void loadCHData();
     void addCHReading();

@@ -14,8 +14,10 @@ simple ClusterHead
         string algorithm = default("ODA-MD");   // "ODA-MD" or "OD"
         string dataFile = default("../data.txt"); // Data file for CH's own readings
         double logInterval @unit(s) = default(100s);
-        @display("i=device/server");
+        double requestInterval @unit(s) = default(1s);  // Interval between data requests
+        @display("i=device/accesspoint,cyan;tt=Cluster Head - ODA-MD/OD Algorithm");
     gates:
-        input in[];
-        output out;
+        input in[];             // Receive data from sensors
+        output out;             // Forward to Sink
+        output toSensor[];      // Send requests to sensors
 }

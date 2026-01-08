@@ -16,7 +16,6 @@ class SensorNode : public cSimpleModule
   private:
     int nodeId;
     int realMoteId;          // Mote ID từ Intel Lab (36, 37, 38)
-    cMessage *sendTimer;
 
     // Data source
     static IntelLabData* sharedData;  // Shared data source
@@ -26,7 +25,6 @@ class SensorNode : public cSimpleModule
     EnergyModel energy;
 
     // Configuration
-    double sendInterval;
     bool useRealData;
 
   protected:

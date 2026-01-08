@@ -94,10 +94,20 @@ void ClusterHead::initialize()
     logTimer = new cMessage("logTimer");
     scheduleAt(simTime() + logInterval, logTimer);
 
+    // Request-Response pattern (Algorithm 1 - ODA-MD paper)
+    requestInterval = par("requestInterval").doubleValue();
+    if (requestInterval <= 0) requestInterval = 1.0;
+    numSensors = gateSize("toSensor");
+    requestId = 0;
+    
+    requestTimer = new cMessage("requestTimer");
+    scheduleAt(simTime() + 0.1, requestTimer);  // First request after 0.1s
+
     EV << "ClusterHead initialized: algorithm="
        << (algorithm == ALG_ODA_MD ? "ODA-MD" : "OD")
        << ", threshold=" << threshold
-       << ", clusterSize=" << clusterSize << "\n";
+       << ", clusterSize=" << clusterSize
+       << ", numSensors=" << numSensors << "\n";
 }
 
 void ClusterHead::handleMessage(cMessage *msg)
@@ -110,6 +120,13 @@ void ClusterHead::handleMessage(cMessage *msg)
            << ", FAR: " << (metrics.getFalseAlarmRate() * 100) << "%\n";
 
         scheduleAt(simTime() + logInterval, logTimer);
+        return;
+    }
+    
+    // Handle request timer - send requests to all sensors (Algorithm 1)
+    if (msg == requestTimer) {
+        sendDataRequest();
+        scheduleAt(simTime() + requestInterval, requestTimer);
         return;
     }
 
@@ -547,9 +564,34 @@ double ClusterHead::calculateEuclidean(const std::vector<double>& sample, const 
     return std::sqrt(sumSq);
 }
 
+// =============================================================================
+// REQUEST-RESPONSE PATTERN (Algorithm 1 - ODA-MD Paper)
+// "The CH_i sends a request req at t time, to all sensors belong to its cluster.
+//  When a sensor N_k receives the request req, it starts the sensing process..."
+// =============================================================================
+void ClusterHead::sendDataRequest()
+{
+    requestId++;
+    
+    EV << "[" << simTime() << "] CH sending request #" << requestId 
+       << " to " << numSensors << " sensors\n";
+    
+    // Send request to all sensors in the cluster
+    for (int i = 0; i < numSensors; i++) {
+        RequestMsg *req = new RequestMsg("DataRequest");
+        req->setRequestId(requestId);
+        
+        send(req, "toSensor", i);
+        
+        // Energy consumption for request transmission (small control packet ~8 bytes)
+        energy.transmit(64, 20.0);  // 64 bits = 8 bytes, 20m distance
+    }
+}
+
 void ClusterHead::finish()
 {
     cancelAndDelete(logTimer);
+    cancelAndDelete(requestTimer);
 
     EV << "\n========================================\n";
     EV << "     CLUSTER HEAD FINAL REPORT\n";
