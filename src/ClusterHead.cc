@@ -29,8 +29,8 @@ void ClusterHead::loadCHData()
     if (loaded) {
         EV << "=== CH DATA LOADED (MoteID=1) ===\n";
         EV << "CH readings: " << chData->getReadingsCount(1) << "\n";
-        // 1 outlier mỗi batch (batch này chỉ có 1 sensor CH nên batchSize nhỏ hơn)
-        chData->injectOutliers(1, 2.5, 10);
+        // Inject exactly 1000 STRONG outliers as per paper
+        chData->injectExactOutliers(1000, 5.0);  // multiplier=5.0 for strong outliers
         EV << "CH outliers injected: " << chData->getTotalOutliers() << "\n";
         EV << "=================================\n";
     }
@@ -58,7 +58,7 @@ void ClusterHead::addCHReading()
 void ClusterHead::initialize()
 {
     clusterSize = par("clusterSize").intValue();
-    if (clusterSize <= 0) clusterSize = 20;
+    if (clusterSize <= 0) clusterSize = 20;  // Paper: Queue size = 50, use 20 for batch
 
     chMoteId = 1;
     dataLoaded = false;
@@ -161,7 +161,13 @@ void ClusterHead::runODAMD()
         return;
     }
 
-    energy.process(1000);
+    // Energy consumption for matrix computation
+    energy.process(1000);  // ~1000 FLOPs for 4x4 matrix inversion
+    
+    // Simulate MICA2 processing delay (8MHz CPU, no FPU)
+    // ~12.5ms per batch for matrix operations
+    double processingDelay = energy.getProcessingDelaySeconds(1000);
+    EV << "MICA2 processing delay: " << (processingDelay * 1000) << " ms\n";
 
     // STEP 4: Tính MD cho tất cả samples
     std::vector<double> mdValues(n);

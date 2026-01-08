@@ -44,9 +44,8 @@ void SensorNode::loadSharedData()
         EV << "Node 37: " << sharedData->getReadingsCount(37) << " readings\n";
         EV << "Node 38: " << sharedData->getReadingsCount(38) << " readings\n";
 
-        // Inject outliers: 1 outlier mỗi batch (batch size = 20)
-        // Đảm bảo chỉ có 1-2 outliers trong mỗi batch để thuật toán dễ phát hiện
-        sharedData->injectOutliers(1, 2.5, 20);  // 1 outlier/batch, multiplier 2.5
+        // Inject exactly 1000 STRONG outliers as per paper
+        sharedData->injectExactOutliers(1000, 5.0);  // multiplier=5.0 for strong outliers
         EV << "Injected outliers: " << sharedData->getTotalOutliers() << "\n";
         EV << "=============================\n";
     } else {

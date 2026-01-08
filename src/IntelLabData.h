@@ -88,17 +88,7 @@ class IntelLabData {
         return totalReadings > 0;
     }
 
-    // =========================================================================
-    // Inject outliers: ĐẢM BẢO CHÍNH XÁC 1-2 OUTLIERS MỖI BATCH
-    // =========================================================================
-    // Cách tiếp cận: Mô phỏng round-robin reading order giống simulation thực tế
-    // Batch size = 20, 3 sensors đọc luân phiên → batch i chứa readings từ vị trí
-    // tương ứng của mỗi sensor.
-    //
-    // Để có 1 outlier/batch: chỉ inject 1 reading trong mỗi khoảng 20 readings TỔNG
-    // Với 3 sensors: mỗi sensor đóng góp ~7 readings/batch
-    // → inject mỗi 7 readings của 1 sensor = ~1 outlier/batch
-    // =========================================================================
+
     void injectOutliers(int outliersPerBatch = 1, double multiplier = 2.5, int batchSize = 20) {
         if (totalReadings == 0) return;
 
@@ -159,22 +149,72 @@ class IntelLabData {
         }
     }
     
-    // Overload để tương thích với code cũ (inject ~count outliers tổng cộng)
-    void injectOutliersLegacy(int count, double multiplier = 2.5, int batchSize = 20) {
-        if (totalReadings == 0) return;
+    // =========================================================================
+    // Inject EXACTLY targetCount outliers (Paper: 1000 outliers)
+    // Creates STRONG multivariate outliers that should be easily detected
+    // =========================================================================
+    void injectExactOutliers(int targetCount = 1000, double multiplier = 5.0) {
+        if (totalReadings == 0 || targetCount <= 0) return;
         
-        int numSensors = sensorData.size();
-        if (numSensors == 0) return;
+        std::srand(42);  // Fixed seed for reproducibility
         
-        // Tính số batch dựa trên tổng readings
-        int totalBatches = totalReadings / batchSize;
+        // Collect all reading indices
+        std::vector<std::pair<int, int>> allIndices;  // (moteId, index)
+        for (const auto& pair : sensorData) {
+            int moteId = pair.first;
+            for (size_t i = 0; i < pair.second.size(); i++) {
+                allIndices.push_back({moteId, (int)i});
+            }
+        }
         
-        // Số outliers mỗi batch để đạt được count outliers tổng
-        int outliersPerBatch = (count + totalBatches - 1) / totalBatches;
-        if (outliersPerBatch < 1) outliersPerBatch = 1;
-        if (outliersPerBatch > 2) outliersPerBatch = 2;  // Cap at 2
+        if (allIndices.empty()) return;
         
-        injectOutliers(outliersPerBatch, multiplier, batchSize);
+        // Calculate interval to distribute outliers evenly
+        int interval = allIndices.size() / targetCount;
+        if (interval < 1) interval = 1;
+        
+        totalOutliers = 0;
+        for (size_t i = 0; i < allIndices.size() && totalOutliers < targetCount; i += interval) {
+            int moteId = allIndices[i].first;
+            int idx = allIndices[i].second;
+            
+            SensorReading& reading = sensorData[moteId][idx];
+            if (!reading.isOutlier) {
+                // === STRONG MULTIVARIATE OUTLIER ===
+                // Vary the type of outlier for diversity
+                int outlierType = totalOutliers % 4;
+                
+                switch (outlierType) {
+                    case 0:  // High T, Low H, High L
+                        reading.temperature *= multiplier;        // +400% (e.g., 20→100)
+                        reading.humidity /= multiplier;           // -80% (e.g., 40→8)
+                        reading.light *= (multiplier * 2);        // +900%
+                        reading.voltage *= 2.0;                   // +100%
+                        break;
+                    case 1:  // Low T, High H, Low L
+                        reading.temperature /= multiplier;        // -80%
+                        reading.humidity *= multiplier;           // +400%
+                        reading.light /= (multiplier * 2);        // -90%
+                        reading.voltage /= 2.0;                   // -50%
+                        break;
+                    case 2:  // All High
+                        reading.temperature *= multiplier;
+                        reading.humidity *= multiplier;
+                        reading.light *= multiplier;
+                        reading.voltage *= 2.5;
+                        break;
+                    case 3:  // All Low
+                        reading.temperature /= multiplier;
+                        reading.humidity /= multiplier;
+                        reading.light /= multiplier;
+                        reading.voltage /= 2.5;
+                        break;
+                }
+                
+                reading.isOutlier = true;
+                totalOutliers++;
+            }
+        }
     }
 
 

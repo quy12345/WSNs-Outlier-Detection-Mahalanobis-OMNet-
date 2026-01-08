@@ -104,6 +104,21 @@ class EnergyModel {
     double getConsumedEnergyMJ() const {
         return consumedEnergy * 1000.0;
     }
+
+    // =========================================================================
+    // MICA2 Processing Delay (Paper: ATmega128L @ 8MHz, no FPU)
+    // =========================================================================
+    // Matrix 4x4 inversion: ~1000 FLOPs
+    // MICA2 8MHz with software FP: ~100 cycles/FLOP
+    // Total: 1000 * 100 / 8MHz = 12.5ms per batch
+    // =========================================================================
+    double getProcessingDelaySeconds(int operations) const {
+        // MICA2: 8MHz clock, ~100 cycles per floating-point operation (no FPU)
+        const double CYCLES_PER_FLOP = 100.0;
+        const double CLOCK_FREQ = 8e6;  // 8 MHz
+        double cycles = operations * CYCLES_PER_FLOP;
+        return cycles / CLOCK_FREQ;
+    }
 };
 
 #endif
