@@ -72,6 +72,10 @@ void ClusterHead::initialize()
         algorithm = ALG_OD;
         threshold = par("odThreshold").doubleValue();
         if (threshold <= 0) threshold = 15.0;
+        
+        // OD Algorithm: Fixed-width clustering parameter
+        clusterWidth = par("clusterWidth").doubleValue();
+        if (clusterWidth <= 0) clusterWidth = 50.0;  // Default cluster width
     } else {
         algorithm = ALG_ODA_MD;
     }
@@ -239,39 +243,210 @@ void ClusterHead::runODAMD()
     }
 }
 
+// =============================================================================
+// OD ALGORITHM (Fawzy et al., 2013) - Full 4-Step Implementation
+// Paper: "Outliers detection and classification in wireless sensor networks"
+// =============================================================================
+
 void ClusterHead::runOD()
 {
     int n = dataBuffer.size();
 
+    // Convert buffer to data matrix
     std::vector<std::vector<double>> X(n, std::vector<double>(4));
     for (int i = 0; i < n; i++) {
         X[i][0] = dataBuffer[i]->getTemperature();
         X[i][1] = dataBuffer[i]->getHumidity();
         X[i][2] = dataBuffer[i]->getLight();
         X[i][3] = dataBuffer[i]->getVoltage();
+        
+        // Track sensor readings for trust calculation
+        int sensorId = dataBuffer[i]->getSourceId();
+        sensorTotalCount[sensorId]++;
     }
 
-    std::vector<double> mu = calculateMean(X);
-    energy.process(100);
+    energy.process(200);  // More computation than ODA-MD due to clustering
 
-    for (int i = 0; i < n; i++) {
-        double ed = calculateEuclidean(X[i], mu);
-        bool actualOutlier = dataBuffer[i]->isOutlier();
-        bool detectedAsOutlier = (ed >= threshold);
+    // === STEP 1: Fixed-Width Clustering ===
+    runOD_Clustering(X);
+    
+    // === STEP 2: Outlier Detection (Inter-cluster distance) ===
+    runOD_Detection();
+    
+    // === STEP 3 & 4: Classification and Processing ===
+    runOD_Classification(X);
+}
 
-        metrics.recordDetection(actualOutlier, detectedAsOutlier);
+// -----------------------------------------------------------------------------
+// STEP 1: Fixed-Width Clustering
+// Assign points to clusters based on distance to cluster center
+// -----------------------------------------------------------------------------
+void ClusterHead::runOD_Clustering(const std::vector<std::vector<double>>& X)
+{
+    odClusters.clear();
+    
+    for (size_t i = 0; i < X.size(); i++) {
+        bool assigned = false;
+        
+        // Try to assign to existing cluster
+        for (auto& cluster : odClusters) {
+            double dist = calculateEuclidean(X[i], cluster.center);
+            if (dist <= clusterWidth) {
+                // Assign to this cluster
+                cluster.members.push_back(i);
+                
+                // Update cluster center (incremental mean)
+                int m = cluster.members.size();
+                for (int j = 0; j < 4; j++) {
+                    cluster.center[j] = ((m - 1) * cluster.center[j] + X[i][j]) / m;
+                }
+                assigned = true;
+                break;
+            }
+        }
+        
+        // Create new cluster if not assigned
+        if (!assigned) {
+            DataCluster newCluster;
+            newCluster.center = X[i];
+            newCluster.members.push_back(i);
+            newCluster.isOutlier = false;
+            newCluster.avgInterClusterDist = 0;
+            odClusters.push_back(newCluster);
+        }
+    }
+    
+    EV << "[OD] Created " << odClusters.size() << " clusters from " << X.size() << " points\n";
+}
 
-        if (detectedAsOutlier) {
-            EV << " -> OD Outlier: Node " << dataBuffer[i]->getSourceId()
-               << " ED=" << ed << "\n";
+// -----------------------------------------------------------------------------
+// STEP 2: Outlier Detection
+// A cluster is outlier if its avg inter-cluster distance > mean + std
+// -----------------------------------------------------------------------------
+void ClusterHead::runOD_Detection()
+{
+    int numClusters = odClusters.size();
+    if (numClusters <= 1) return;
+    
+    // Calculate inter-cluster distances
+    for (int i = 0; i < numClusters; i++) {
+        double sumDist = 0;
+        for (int j = 0; j < numClusters; j++) {
+            if (i != j) {
+                sumDist += calculateEuclidean(odClusters[i].center, odClusters[j].center);
+            }
+        }
+        odClusters[i].avgInterClusterDist = sumDist / (numClusters - 1);
+    }
+    
+    // Calculate mean and std of distances
+    double sumDist = 0;
+    for (const auto& cluster : odClusters) {
+        sumDist += cluster.avgInterClusterDist;
+    }
+    double meanDist = sumDist / numClusters;
+    
+    double variance = 0;
+    for (const auto& cluster : odClusters) {
+        double diff = cluster.avgInterClusterDist - meanDist;
+        variance += diff * diff;
+    }
+    double stdDist = std::sqrt(variance / numClusters);
+    
+    // Label outlier clusters (distance > mean + 1*std)
+    double outlierThreshold = meanDist + stdDist;
+    int outlierClusterCount = 0;
+    
+    for (auto& cluster : odClusters) {
+        if (cluster.avgInterClusterDist > outlierThreshold) {
+            cluster.isOutlier = true;
+            outlierClusterCount++;
+        }
+    }
+    
+    EV << "[OD] Threshold=" << outlierThreshold << " (mean=" << meanDist 
+       << " + std=" << stdDist << "), " << outlierClusterCount << " outlier clusters\n";
+}
+
+// -----------------------------------------------------------------------------
+// STEP 3 & 4: Classification (Error vs Event) + Trust + Processing
+// -----------------------------------------------------------------------------
+void ClusterHead::runOD_Classification(const std::vector<std::vector<double>>& X)
+{
+    int detectedCount = 0;
+    int bufferSize = dataBuffer.size();
+    
+    // First pass: collect all cluster sensor info (before any deletion)
+    std::vector<std::set<int>> clusterSensors(odClusters.size());
+    for (size_t c = 0; c < odClusters.size(); c++) {
+        for (int idx : odClusters[c].members) {
+            clusterSensors[c].insert(dataBuffer[idx]->getSourceId());
+        }
+    }
+    
+    // Track which messages to delete (don't delete in loop to avoid issues)
+    std::vector<bool> toDelete(bufferSize, false);
+    std::vector<bool> toSend(bufferSize, false);
+    
+    // Second pass: mark for deletion/sending
+    for (size_t c = 0; c < odClusters.size(); c++) {
+        const auto& cluster = odClusters[c];
+        bool isEvent = (clusterSensors[c].size() >= 2);
+        
+        for (int idx : cluster.members) {
+            bool actualOutlier = dataBuffer[idx]->isOutlier();
+            bool detectedAsOutlier = cluster.isOutlier;
+            int sensorId = dataBuffer[idx]->getSourceId();
+            
+            // Record metrics
+            metrics.recordDetection(actualOutlier, detectedAsOutlier);
+            
+            if (detectedAsOutlier) {
+                if (!isEvent) {
+                    sensorErrorCount[sensorId]++;
+                }
+                
+                EV << " -> OD Outlier: Node " << sensorId 
+                   << " Cluster=" << c
+                   << " Type=" << (isEvent ? "EVENT" : "ERROR") << "\n";
+                
+                toDelete[idx] = true;
+                totalOutliersDetected++;
+                detectedCount++;
+            } else {
+                toSend[idx] = true;
+            }
+        }
+    }
+    
+    // Third pass: actually send/delete in order
+    for (int i = 0; i < bufferSize; i++) {
+        if (toDelete[i]) {
             delete dataBuffer[i];
-            totalOutliersDetected++;
-        } else {
+        } else if (toSend[i]) {
             send(dataBuffer[i], "out");
             totalPacketsForwarded++;
             energy.transmit(256, 30.0);
         }
     }
+    
+    if (detectedCount > 0) {
+        EV << "[OD] Batch result: " << detectedCount << "/" << bufferSize 
+           << " outliers detected.\n";
+    }
+}
+
+// -----------------------------------------------------------------------------
+// STEP 4: Get Sensor Trust (called in finish())
+// Trust = 1 - (errors / total)
+// -----------------------------------------------------------------------------
+double ClusterHead::getSensorTrust(int sensorId)
+{
+    if (sensorTotalCount.find(sensorId) == sensorTotalCount.end()) return 1.0;
+    int total = sensorTotalCount[sensorId];
+    int errors = sensorErrorCount[sensorId];
+    if (total == 0) return 1.0;
+    return 1.0 - ((double)errors / total);
 }
 
 // --- MATH FUNCTIONS ---

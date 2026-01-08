@@ -8,6 +8,8 @@
 
 #include <omnetpp.h>
 #include <vector>
+#include <map>
+#include <set>
 #include "messages_m.h"
 #include "MetricsCollector.h"
 #include "EnergyModel.h"
@@ -43,6 +45,21 @@ class ClusterHead : public cSimpleModule
     cMessage *logTimer;
     double logInterval;
 
+    // =========================================================================
+    // OD Algorithm (Fawzy et al., 2013) - Data Structures
+    // =========================================================================
+    struct DataCluster {
+        std::vector<double> center;     // 4D center (T, H, L, V)
+        std::vector<int> members;       // Indices of member points
+        bool isOutlier;                 // Outlier cluster flag
+        double avgInterClusterDist;     // Average distance to other clusters
+    };
+    
+    std::vector<DataCluster> odClusters;    // Clusters for OD algorithm
+    double clusterWidth;                     // Fixed-width clustering parameter
+    std::map<int, int> sensorErrorCount;    // Error count per sensor (for trust)
+    std::map<int, int> sensorTotalCount;    // Total readings per sensor
+
   protected:
     virtual void initialize() override;
     virtual void handleMessage(cMessage *msg) override;
@@ -51,9 +68,17 @@ class ClusterHead : public cSimpleModule
     void loadCHData();
     void addCHReading();
 
+    // ODA-MD Algorithm
     void runODAMD();
+    
+    // OD Algorithm (Fawzy et al.) - Full 4-Step
     void runOD();
+    void runOD_Clustering(const std::vector<std::vector<double>>& X);
+    void runOD_Detection();
+    void runOD_Classification(const std::vector<std::vector<double>>& X);
+    double getSensorTrust(int sensorId);
 
+    // Math utilities
     std::vector<double> calculateMean(const std::vector<std::vector<double>>& data);
     std::vector<std::vector<double>> calculateCovariance(const std::vector<std::vector<double>>& data, const std::vector<double>& mean);
     bool invertMatrix4x4(const std::vector<std::vector<double>>& matrix, std::vector<std::vector<double>>& inverse);

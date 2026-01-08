@@ -38,6 +38,8 @@ class MetricsCollector {
         logTimes.clear();
         logDA.clear();
         logFAR.clear();
+        logTP.clear();
+        logFP.clear();
     }
 
     // Record a detection result
@@ -79,7 +81,13 @@ class MetricsCollector {
         logTimes.push_back(time);
         logDA.push_back(getDetectionAccuracy());
         logFAR.push_back(getFalseAlarmRate());
+        // Also log cumulative counts for paper-style graphs
+        logTP.push_back(truePositives);
+        logFP.push_back(falsePositives);
     }
+    
+    std::vector<int> logTP;   // Cumulative TP over time
+    std::vector<int> logFP;   // Cumulative FP over time
 
     // Get statistics
     int getTP() const { return truePositives; }
@@ -90,16 +98,19 @@ class MetricsCollector {
     int getTotalOutliersDetected() const { return truePositives + falsePositives; }
     int getActualOutliers() const { return truePositives + falseNegatives; }
 
-    // Export metrics to CSV file
+    // Export metrics to CSV file (with cumulative data for paper-style graphs)
     void exportToCSV(const std::string& filename) const {
         std::ofstream file(filename);
         if (!file.is_open()) return;
 
-        file << "Time,DA,FAR\n";
+        // Header: Time, DA%, FAR%, Cumulative TP, Cumulative FP
+        file << "Time,DA,FAR,CumulativeTP,CumulativeFP\n";
         for (size_t i = 0; i < logTimes.size(); i++) {
             file << std::fixed << std::setprecision(2) << logTimes[i].dbl()
                  << "," << std::setprecision(4) << logDA[i]
-                 << "," << logFAR[i] << "\n";
+                 << "," << logFAR[i]
+                 << "," << logTP[i]
+                 << "," << logFP[i] << "\n";
         }
 
         file.close();
