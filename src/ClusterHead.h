@@ -8,6 +8,7 @@
 
 #include <omnetpp.h>
 #include <vector>
+#include <deque>
 #include <map>
 #include <set>
 #include "messages_m.h"
@@ -22,15 +23,18 @@ enum Algorithm {
     ALG_OD
 };
 
+// Sliding Window size for real-time processing
+const int WINDOW_SIZE = 20;
+
 class ClusterHead : public cSimpleModule
 {
   private:
-    int clusterSize;
     double threshold;
     Algorithm algorithm;
     int chMoteId;
 
-    std::vector<SensorMsg *> dataBuffer;
+    // Sliding Window for real-time ODA-MD (replaces block batching)
+    std::deque<SensorMsg *> slidingWindow;
 
     IntelLabData* chData;
     bool dataLoaded;
@@ -41,6 +45,9 @@ class ClusterHead : public cSimpleModule
     int totalPacketsReceived;
     int totalOutliersDetected;
     int totalPacketsForwarded;
+    
+    // Flag to track if initial window has been processed
+    bool isInitialWindowProcessed;
 
     cMessage *logTimer;
     double logInterval;

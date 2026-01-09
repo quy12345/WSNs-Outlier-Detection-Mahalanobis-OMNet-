@@ -52,14 +52,11 @@ void ClusterHead::addCHReading()
     chMsg->setVoltage(reading.voltage);
     chMsg->setIsOutlier(reading.isOutlier);
 
-    dataBuffer.push_back(chMsg);
+    slidingWindow.push_back(chMsg);
 }
 
 void ClusterHead::initialize()
 {
-    clusterSize = par("clusterSize").intValue();
-    if (clusterSize <= 0) clusterSize = 20;  // Paper: Queue size = 50, use 20 for batch
-
     chMoteId = 1;
     dataLoaded = false;
     chData = nullptr;
@@ -87,6 +84,7 @@ void ClusterHead::initialize()
     totalPacketsReceived = 0;
     totalOutliersDetected = 0;
     totalPacketsForwarded = 0;
+    isInitialWindowProcessed = false;  // First 20 samples not yet processed
 
     logInterval = par("logInterval").doubleValue();
     if (logInterval <= 0) logInterval = 100.0;
@@ -106,7 +104,7 @@ void ClusterHead::initialize()
     EV << "ClusterHead initialized: algorithm="
        << (algorithm == ALG_ODA_MD ? "ODA-MD" : "OD")
        << ", threshold=" << threshold
-       << ", clusterSize=" << clusterSize
+       << ", windowSize=" << WINDOW_SIZE
        << ", numSensors=" << numSensors << "\n";
 }
 
@@ -132,131 +130,172 @@ void ClusterHead::handleMessage(cMessage *msg)
 
     SensorMsg *sMsg = check_and_cast<SensorMsg *>(msg);
     totalPacketsReceived++;
-    dataBuffer.push_back(sMsg);
     energy.receive(256);
 
-    // Khi buffer đầy, chạy thuật toán
-    if ((int)dataBuffer.size() >= clusterSize) {
-        
+    // =========================================================================
+    // SLIDING WINDOW MECHANISM (Real-time processing)
+    // - Push new sample to the end of the window
+    // - If window exceeds WINDOW_SIZE, remove oldest sample (pop_front)
+    // - Process immediately when window is full (WINDOW_SIZE samples)
+    // =========================================================================
+    
+    slidingWindow.push_back(sMsg);
+    
+    // Remove oldest sample if window exceeds size
+    if ((int)slidingWindow.size() > WINDOW_SIZE) {
+        // Delete the oldest message to prevent memory leak
+        delete slidingWindow.front();
+        slidingWindow.pop_front();
+    }
+    
+    // Process immediately when window has exactly WINDOW_SIZE samples
+    if ((int)slidingWindow.size() == WINDOW_SIZE) {
         if (algorithm == ALG_ODA_MD) {
-            runODAMD();
+            runODAMD();  // Real-time: process the newest sample immediately
         } else {
-            runOD();
+            runOD();     // OD still uses batch processing
         }
-
-        dataBuffer.clear();
     }
 }
 
-// === ODA-MD Algorithm (theo đúng bài báo) ===
+// =============================================================================
+// ODA-MD Algorithm with SLIDING WINDOW (Real-time processing)
+// HYBRID APPROACH:
+// - Initial 20 samples: Calculate MD for ALL samples, block outliers but keep in window
+// - After initial 20: Calculate MD for NEWEST sample only, block/forward accordingly
+// - All samples stay in window for error/event classification
+// =============================================================================
 void ClusterHead::runODAMD()
 {
-    int n = dataBuffer.size();
+    int n = slidingWindow.size();
+    if (n < WINDOW_SIZE) return;  // Wait until window is full
 
-    // Chuyển đổi sang vector
+    // Convert sliding window to data matrix
     std::vector<std::vector<double>> X(n, std::vector<double>(4));
     for (int i = 0; i < n; i++) {
-        X[i][0] = dataBuffer[i]->getTemperature();
-        X[i][1] = dataBuffer[i]->getHumidity();
-        X[i][2] = dataBuffer[i]->getLight();
-        X[i][3] = dataBuffer[i]->getVoltage();
+        X[i][0] = slidingWindow[i]->getTemperature();
+        X[i][1] = slidingWindow[i]->getHumidity();
+        X[i][2] = slidingWindow[i]->getLight();
+        X[i][3] = slidingWindow[i]->getVoltage();
     }
 
-    // STEP 1: Tính Mean từ batch hiện tại
+    // STEP 1: Calculate Mean from current window (slides with new data)
     std::vector<double> mu = calculateMean(X);
     
-    // STEP 2: Tính Covariance từ batch
+    // STEP 2: Calculate Covariance from current window
     std::vector<std::vector<double>> Sigma = calculateCovariance(X, mu);
 
-    // STEP 3: Nghịch đảo Covariance
+    // STEP 3: Invert Covariance matrix
     std::vector<std::vector<double>> InvSigma(4, std::vector<double>(4));
     bool success = invertMatrix4x4(Sigma, InvSigma);
 
     if (!success) {
         EV << "Warning: Singular Matrix!\n";
-        for (auto sMsg : dataBuffer) {
-            metrics.recordDetection(sMsg->isOutlier(), false);
-            send(sMsg, "out");
-            totalPacketsForwarded++;
-        }
+        // For newest sample only - forward without detection
+        SensorMsg* newestMsg = slidingWindow.back();
+        metrics.recordDetection(newestMsg->isOutlier(), false);
+        send(newestMsg->dup(), "out");  // Send a copy (original stays in window)
+        totalPacketsForwarded++;
         return;
     }
 
     // Energy consumption for matrix computation
     energy.process(1000);  // ~1000 FLOPs for 4x4 matrix inversion
+
+    // =========================================================================
+    // HYBRID DETECTION LOGIC
+    // =========================================================================
     
-    // Simulate MICA2 processing delay (8MHz CPU, no FPU)
-    // ~12.5ms per batch for matrix operations
-    double processingDelay = energy.getProcessingDelaySeconds(1000);
-    EV << "MICA2 processing delay: " << (processingDelay * 1000) << " ms\n";
-
-    // STEP 4: Tính MD cho tất cả samples
-    std::vector<double> mdValues(n);
-    double maxMD = 0, minMD = 1e9;
-    int actualOutlierCount = 0;
-    
-    for (int i = 0; i < n; i++) {
-        mdValues[i] = calculateMahalanobis(X[i], mu, InvSigma);
-        if (mdValues[i] > maxMD) maxMD = mdValues[i];
-        if (mdValues[i] < minMD) minMD = mdValues[i];
-        if (dataBuffer[i]->isOutlier()) actualOutlierCount++;
-    }
-
-    // === LƯU THÔNG TIN TRƯỚC KHI XÓA ===
-    std::vector<bool> isActualOutlier(n);
-    std::vector<int> sourceIds(n);
-    for (int i = 0; i < n; i++) {
-        isActualOutlier[i] = dataBuffer[i]->isOutlier();
-        sourceIds[i] = dataBuffer[i]->getSourceId();
-    }
-
-    // === LOG CHI TIẾT NẾU CÓ OUTLIER THỰC SỰ TRONG BATCH ===
-    if (actualOutlierCount > 0) {
-        EV << "\n=== BATCH ANALYSIS (có " << actualOutlierCount << " outlier thực) ===\n";
+    if (!isInitialWindowProcessed) {
+        // =================================================================
+        // INITIAL WINDOW: Calculate MD for ALL 20 samples
+        // Outliers are blocked but STAY in window (for error/event detection)
+        // =================================================================
+        EV << "\n=== INITIAL WINDOW PROCESSING (all " << n << " samples) ===\n";
         EV << "Mean: T=" << mu[0] << " H=" << mu[1] << " L=" << mu[2] << " V=" << mu[3] << "\n";
-        EV << "Variance (diagonal): T=" << Sigma[0][0] << " H=" << Sigma[1][1] 
-           << " L=" << Sigma[2][2] << " V=" << Sigma[3][3] << "\n";
-        EV << "MD range: [" << minMD << ", " << maxMD << "], threshold=" << threshold << "\n";
         
-        // Log từng sample với label TP/TN/FP/FN
+        int detectedCount = 0;
         for (int i = 0; i < n; i++) {
-            bool actual = isActualOutlier[i];
-            bool detected = (mdValues[i] >= threshold);
+            SensorMsg* msg = slidingWindow[i];
+            double md = calculateMahalanobis(X[i], mu, InvSigma);
+            bool actualOutlier = msg->isOutlier();
+            bool detectedAsOutlier = (md >= threshold);
+            int sourceId = msg->getSourceId();
             
-            EV << "  [" << i << "] Node" << sourceIds[i]
-               << " T=" << X[i][0] << " MD=" << mdValues[i];
+            // Record detection metrics
+            metrics.recordDetection(actualOutlier, detectedAsOutlier);
             
-            if (actual && detected) EV << " [TP]";
-            else if (actual && !detected) EV << " [FN-MISSED!]";
-            else if (!actual && detected) EV << " [FP]";
-            else EV << " [TN]";
+            // Log result
+            EV << "  [" << i << "] Node" << sourceId
+               << " T=" << X[i][0] << " MD=" << md;
             
+            if (actualOutlier && detectedAsOutlier) {
+                EV << " [TP]";
+            } else if (actualOutlier && !detectedAsOutlier) {
+                EV << " [FN-MISSED!]";
+            } else if (!actualOutlier && detectedAsOutlier) {
+                EV << " [FP]";
+            } else {
+                EV << " [TN]";
+            }
+            
+            if (detectedAsOutlier) {
+                EV << " -> BLOCKED";
+                totalOutliersDetected++;
+                detectedCount++;
+                // Sample stays in window (not deleted) for error/event classification
+            } else {
+                EV << " -> FORWARDED";
+                send(msg->dup(), "out");  // Send copy, original stays in window
+                totalPacketsForwarded++;
+                energy.transmit(256, 30.0);
+            }
             EV << "\n";
         }
-        EV << "=== END BATCH ===\n\n";
-    }
-
-    // STEP 5: Phát hiện outliers và xử lý
-    int detectedCount = 0;
-
-    for (int i = 0; i < n; i++) {
-        bool detectedAsOutlier = (mdValues[i] >= threshold);
-
-        metrics.recordDetection(isActualOutlier[i], detectedAsOutlier);
-
-        if (detectedAsOutlier) {
-            delete dataBuffer[i];
-            totalOutliersDetected++;
-            detectedCount++;
+        
+        EV << "=== INITIAL WINDOW DONE: " << detectedCount << "/" << n << " outliers blocked ===\n\n";
+        isInitialWindowProcessed = true;
+        
+    } else {
+        // =================================================================
+        // SLIDING MODE: Only calculate MD for the NEWEST sample
+        // =================================================================
+        int newestIdx = n - 1;
+        SensorMsg* newestMsg = slidingWindow[newestIdx];
+        
+        double md = calculateMahalanobis(X[newestIdx], mu, InvSigma);
+        bool actualOutlier = newestMsg->isOutlier();
+        bool detectedAsOutlier = (md >= threshold);
+        int sourceId = newestMsg->getSourceId();
+        
+        // Record detection metrics
+        metrics.recordDetection(actualOutlier, detectedAsOutlier);
+        
+        // Log detection result
+        EV << "[SLIDING] Node" << sourceId
+           << " T=" << X[newestIdx][0]
+           << " MD=" << md;
+        
+        if (actualOutlier && detectedAsOutlier) {
+            EV << " [TP]";
+        } else if (actualOutlier && !detectedAsOutlier) {
+            EV << " [FN-MISSED!]";
+        } else if (!actualOutlier && detectedAsOutlier) {
+            EV << " [FP]";
         } else {
-            send(dataBuffer[i], "out");
+            EV << " [TN]";
+        }
+        
+        if (detectedAsOutlier) {
+            EV << " -> BLOCKED\n";
+            totalOutliersDetected++;
+            // Sample stays in window for error/event classification
+        } else {
+            EV << " -> FORWARDED\n";
+            send(newestMsg->dup(), "out");  // Send copy, original stays in window
             totalPacketsForwarded++;
             energy.transmit(256, 30.0);
         }
-    }
-
-    if (detectedCount > 0) {
-        EV << "Batch result: " << detectedCount << "/" << n << " outliers detected.\n";
     }
 }
 
@@ -267,18 +306,18 @@ void ClusterHead::runODAMD()
 
 void ClusterHead::runOD()
 {
-    int n = dataBuffer.size();
+    int n = slidingWindow.size();
 
     // Convert buffer to data matrix
     std::vector<std::vector<double>> X(n, std::vector<double>(4));
     for (int i = 0; i < n; i++) {
-        X[i][0] = dataBuffer[i]->getTemperature();
-        X[i][1] = dataBuffer[i]->getHumidity();
-        X[i][2] = dataBuffer[i]->getLight();
-        X[i][3] = dataBuffer[i]->getVoltage();
+        X[i][0] = slidingWindow[i]->getTemperature();
+        X[i][1] = slidingWindow[i]->getHumidity();
+        X[i][2] = slidingWindow[i]->getLight();
+        X[i][3] = slidingWindow[i]->getVoltage();
         
         // Track sensor readings for trust calculation
-        int sensorId = dataBuffer[i]->getSourceId();
+        int sensorId = slidingWindow[i]->getSourceId();
         sensorTotalCount[sensorId]++;
     }
 
@@ -292,6 +331,12 @@ void ClusterHead::runOD()
     
     // === STEP 3 & 4: Classification and Processing ===
     runOD_Classification(X);
+    
+    // OD uses batch processing - clear window after processing
+    for (auto msg : slidingWindow) {
+        delete msg;
+    }
+    slidingWindow.clear();
 }
 
 // -----------------------------------------------------------------------------
@@ -301,6 +346,18 @@ void ClusterHead::runOD()
 void ClusterHead::runOD_Clustering(const std::vector<std::vector<double>>& X)
 {
     odClusters.clear();
+    
+    // ==========================================================================
+    // OD ENERGY OVERHEAD: Clustering requires neighbor information exchange
+    // Paper (Fawzy et al.): "clustering algorithm is applied to group data"
+    // Each sensor broadcasts its data to neighbors to find cluster membership
+    // ==========================================================================
+    int numDataPoints = X.size();
+    // Broadcast: each point sends 128 bits (4 attributes × 32 bits) to neighbors
+    // Average distance to neighbor: 30m
+    energy.transmit(128 * numDataPoints, 30.0);
+    // Receive cluster assignments from potential cluster centers
+    energy.receive(64 * numDataPoints);
     
     for (size_t i = 0; i < X.size(); i++) {
         bool assigned = false;
@@ -344,6 +401,18 @@ void ClusterHead::runOD_Detection()
 {
     int numClusters = odClusters.size();
     if (numClusters <= 1) return;
+    
+    // ==========================================================================
+    // OD ENERGY OVERHEAD: Inter-cluster distance requires CH-to-CH communication
+    // Paper (Fawzy et al.): "for each cluster, an algorithm of outlier detection
+    // is launched to classify normal and outlier cluster"
+    // Each cluster broadcasts its center to all other clusters
+    // ==========================================================================
+    // Each cluster sends center (128 bits) to all other clusters
+    // Distance between CHs: ~50m (larger than sensor-to-CH)
+    energy.transmit(128 * numClusters, 50.0);
+    // Receive center info from all other clusters
+    energy.receive(128 * numClusters * (numClusters - 1));
     
     // Calculate inter-cluster distances
     for (int i = 0; i < numClusters; i++) {
@@ -391,13 +460,29 @@ void ClusterHead::runOD_Detection()
 void ClusterHead::runOD_Classification(const std::vector<std::vector<double>>& X)
 {
     int detectedCount = 0;
-    int bufferSize = dataBuffer.size();
+    int bufferSize = slidingWindow.size();
+    
+    // ==========================================================================
+    // OD ENERGY OVERHEAD: Classification requires additional message exchange
+    // Paper (Fawzy et al.): "outlier classification is executed to separate 
+    // error and event data" - requires checking if multiple sensors report same
+    // ==========================================================================
+    // Classification overhead: query neighbors to distinguish error vs event
+    // 64 bits query per outlier cluster, 30m distance
+    int numOutlierClusters = 0;
+    for (const auto& cluster : odClusters) {
+        if (cluster.isOutlier) numOutlierClusters++;
+    }
+    if (numOutlierClusters > 0) {
+        energy.transmit(64 * numOutlierClusters * numSensors, 30.0);
+        energy.receive(64 * numOutlierClusters * numSensors);
+    }
     
     // First pass: collect all cluster sensor info (before any deletion)
     std::vector<std::set<int>> clusterSensors(odClusters.size());
     for (size_t c = 0; c < odClusters.size(); c++) {
         for (int idx : odClusters[c].members) {
-            clusterSensors[c].insert(dataBuffer[idx]->getSourceId());
+            clusterSensors[c].insert(slidingWindow[idx]->getSourceId());
         }
     }
     
@@ -411,9 +496,9 @@ void ClusterHead::runOD_Classification(const std::vector<std::vector<double>>& X
         bool isEvent = (clusterSensors[c].size() >= 2);
         
         for (int idx : cluster.members) {
-            bool actualOutlier = dataBuffer[idx]->isOutlier();
+            bool actualOutlier = slidingWindow[idx]->isOutlier();
             bool detectedAsOutlier = cluster.isOutlier;
-            int sensorId = dataBuffer[idx]->getSourceId();
+            int sensorId = slidingWindow[idx]->getSourceId();
             
             // Record metrics
             metrics.recordDetection(actualOutlier, detectedAsOutlier);
@@ -436,12 +521,10 @@ void ClusterHead::runOD_Classification(const std::vector<std::vector<double>>& X
         }
     }
     
-    // Third pass: actually send/delete in order
+    // Third pass: actually send in order (deletion handled in runOD)
     for (int i = 0; i < bufferSize; i++) {
-        if (toDelete[i]) {
-            delete dataBuffer[i];
-        } else if (toSend[i]) {
-            send(dataBuffer[i], "out");
+        if (toSend[i]) {
+            send(slidingWindow[i]->dup(), "out");  // Send copy for OD batch mode
             totalPacketsForwarded++;
             energy.transmit(256, 30.0);
         }
@@ -592,13 +675,19 @@ void ClusterHead::finish()
 {
     cancelAndDelete(logTimer);
     cancelAndDelete(requestTimer);
+    
+    // Clean up remaining messages in sliding window
+    for (auto msg : slidingWindow) {
+        delete msg;
+    }
+    slidingWindow.clear();
 
     EV << "\n========================================\n";
     EV << "     CLUSTER HEAD FINAL REPORT\n";
     EV << "========================================\n";
-    EV << "Algorithm: " << (algorithm == ALG_ODA_MD ? "ODA-MD" : "OD") << "\n";
+    EV << "Algorithm: " << (algorithm == ALG_ODA_MD ? "ODA-MD (Sliding Window)" : "OD (Batch)") << "\n";
     EV << "Threshold: " << threshold << "\n";
-    EV << "Batch Size: " << clusterSize << "\n";
+    EV << "Window Size: " << WINDOW_SIZE << "\n";
     EV << "----------------------------------------\n";
     EV << "Total Received:    " << totalPacketsReceived << "\n";
     EV << "Outliers Detected: " << totalOutliersDetected << "\n";
@@ -607,6 +696,44 @@ void ClusterHead::finish()
     EV << "----------------------------------------\n";
 
     metrics.printSummary();
+
+    // =========================================================================
+    // OD ALGORITHM STEP 4: Measuring Sensor Trustfulness (Fawzy et al., 2013)
+    // Paper: "Trust(s_i) = 1 - (N_ol / N_i)"
+    // Where: N_ol = erroneous readings, N_i = total readings
+    // This computation is done locally at CH, so minimal energy overhead
+    // =========================================================================
+    if (algorithm == ALG_OD && !sensorTotalCount.empty()) {
+        EV << "\n========================================\n";
+        EV << "  OD STEP 4: SENSOR TRUSTFULNESS\n";
+        EV << "========================================\n";
+        
+        // Energy for trust computation (local processing only, no communication)
+        energy.process(50 * sensorTotalCount.size());  // ~50 FLOPs per sensor
+        
+        for (const auto& pair : sensorTotalCount) {
+            int sensorId = pair.first;
+            double trust = getSensorTrust(sensorId);
+            int total = pair.second;
+            int errors = (sensorErrorCount.find(sensorId) != sensorErrorCount.end()) 
+                         ? sensorErrorCount[sensorId] : 0;
+            
+            EV << "  Sensor " << sensorId << ": "
+               << "Total=" << total 
+               << ", Errors=" << errors 
+               << ", Trust=" << (trust * 100) << "%";
+            
+            // Classify sensor reliability
+            if (trust >= 0.95) {
+                EV << " [RELIABLE]\n";
+            } else if (trust >= 0.80) {
+                EV << " [MODERATE]\n";
+            } else {
+                EV << " [UNRELIABLE - Consider replacement]\n";
+            }
+        }
+        EV << "========================================\n";
+    }
 
     std::string csvFile = (algorithm == ALG_ODA_MD) ? "metrics_odamd.csv" : "metrics_od.csv";
     metrics.exportToCSV(csvFile);
