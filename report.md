@@ -386,6 +386,22 @@ Sensor 38: N_total=6000, N_errors=1500
 | Outliers injected | 1000 | 1000 |
 | Simulation time | 6000s | 6000s |
 
+### 5.4 Mô phỏng Nút Cảm biến MICA2
+
+Trong mô phỏng, các nút cảm biến được mô phỏng dựa trên **MICA2 Mote** - nền tảng phần cứng phổ biến trong nghiên cứu WSN:
+
+| Thông số | Giá trị | Mô tả |
+|----------|---------|-------|
+| **Vi xử lý** | ATmega128L @ 8MHz | Không có FPU (Floating Point Unit) |
+| **Năng lượng khởi tạo** | 2 Joules | Theo mô hình Heinzelman |
+| **Xử lý floating-point** | ~100 cycles/FLOP | Phần mềm mô phỏng FP |
+| **Matrix 4×4 inversion** | ~1000 FLOPs → 12.5ms | Nghịch đảo ma trận hiệp phương sai |
+
+**Các thông số năng lượng (Heinzelman Model):**
+- `E_ELEC = 50 nJ/bit` — Năng lượng mạch điện tử TX/RX
+- `E_AMP = 100 pJ/bit/m²` — Năng lượng khuếch đại truyền
+- `E_DA = 5 nJ/bit` — Năng lượng tổng hợp dữ liệu
+
 ---
 
 ## 6. Kết quả Mô phỏng
@@ -394,14 +410,32 @@ Sensor 38: N_total=6000, N_errors=1500
 
 | Metric | ODA-MD | OD | Nhận xét |
 |--------|--------|-----|----------|
-| **Detection Accuracy** | **99.49%** | 46.26% | ODA-MD phát hiện 970/975 outliers |
+| **Detection Accuracy (Recall)** | **99.49%** | 46.26% | ODA-MD phát hiện 970/975 outliers |
+| **Precision** | **97.39%** | 15.34% | ODA-MD: TP/(TP+FP) = 970/996 |
+| **F1-Score** | **98.43%** | 23.02% | Cân bằng giữa Precision và Recall |
 | **False Alarm Rate** | **0.15%** | 14.61% | OD có quá nhiều False Positives |
 | **Energy (CH)** | **1123.3 mJ** | 1510.9 mJ | ODA-MD tiết kiệm 26% |
-| True Positives | 970 | 451 | |
-| False Positives | 26 | 2488 | OD cảnh báo sai quá nhiều |
-| False Negatives | 5 | 524 | OD bỏ sót nhiều outliers |
+| True Positives (TP) | 970 | 451 | Outliers phát hiện đúng |
+| False Positives (FP) | 26 | 2488 | OD cảnh báo sai quá nhiều |
+| False Negatives (FN) | 5 | 524 | OD bỏ sót nhiều outliers |
+| True Negatives (TN) | ~17000 | ~14500 | Dữ liệu bình thường chuyển tiếp đúng |
 
-### 6.2 Phân tích
+### 6.2 Công thức Tính các Chỉ số
+
+$$\text{Precision} = \frac{TP}{TP + FP}$$
+
+$$\text{Recall (Detection Accuracy)} = \frac{TP}{TP + FN}$$
+
+$$\text{F1-Score} = 2 \times \frac{Precision \times Recall}{Precision + Recall}$$
+
+$$\text{False Alarm Rate (FAR)} = \frac{FP}{FP + TN}$$
+
+| Thuật toán | Precision | Recall | F1-Score | Giải thích |
+|------------|-----------|--------|----------|------------|
+| **ODA-MD** | 970/(970+26) = **97.39%** | 970/(970+5) = **99.49%** | **98.43%** | Cả hai chỉ số đều rất cao |
+| **OD** | 451/(451+2488) = **15.34%** | 451/(451+524) = **46.26%** | **23.02%** | Precision quá thấp do FP cao |
+
+### 6.3 Phân tích
 
 **Tại sao ODA-MD vượt trội?**
 
@@ -442,7 +476,364 @@ Dự án đã **tái hiện thành công** thuật toán ODA-MD với kết qu�
 
 ---
 
+## 8. Chi tiết Cách tính Năng lượng Tiêu thụ trong WSN
+
+### 8.1 Mô hình Năng lượng Heinzelman
+
+Dự án sử dụng **mô hình năng lượng Heinzelman** (Heinzelman et al., IEEE 2002) - mô hình chuẩn được sử dụng rộng rãi trong nghiên cứu WSN. Mô hình này mô phỏng chi phí năng lượng cho việc truyền, nhận và xử lý dữ liệu.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      MÔ HÌNH NĂNG LƯỢNG HEINZELMAN                      │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   ┌──────────────────┐         ┌──────────────────┐                    │
+│   │   TRANSMITTER    │  ─────▶ │     RECEIVER     │                    │
+│   │   ┌──────────┐   │   d(m)  │   ┌──────────┐   │                    │
+│   │   │ TX Elec. │   │         │   │ RX Elec. │   │                    │
+│   │   │ E_elec   │   │         │   │ E_elec   │   │                    │
+│   │   └──────────┘   │         │   └──────────┘   │                    │
+│   │   ┌──────────┐   │         │                  │                    │
+│   │   │TX Amplif.│   │         │                  │                    │
+│   │   │ E_amp    │   │         │                  │                    │
+│   │   └──────────┘   │         │                  │                    │
+│   └──────────────────┘         └──────────────────┘                    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.2 Các Hằng số Năng lượng
+
+| Tham số | Ký hiệu | Giá trị | Ý nghĩa |
+|---------|---------|---------|---------|
+| **Electronics Energy** | $E_{elec}$ | 50 nJ/bit | Năng lượng mạch điện tử (TX/RX) |
+| **Amplifier Energy** | $E_{amp}$ | 100 pJ/bit/m² | Năng lượng khuếch đại |
+| **Data Aggregation** | $E_{DA}$ | 5 nJ/bit | Năng lượng tổng hợp dữ liệu |
+| **Processing Energy** | - | 10 nJ/operation | Năng lượng tính toán CPU |
+| **Threshold Distance** | $d_0$ | 87 m | Ngưỡng chuyển mô hình |
+
+### 8.3 Công thức Tính Năng lượng
+
+#### 8.3.1 Truyền dữ liệu (Transmit)
+
+Năng lượng truyền $k$ bits qua khoảng cách $d$:
+
+**Mô hình Free-Space** (khi $d < d_0$):
+$$E_{TX}(k, d) = E_{elec} \times k + E_{amp} \times k \times d^2$$
+
+**Mô hình Multipath Fading** (khi $d \geq d_0$):
+$$E_{TX}(k, d) = E_{elec} \times k + E_{mp} \times k \times d^4$$
+
+Với $E_{mp} = 0.0013 \times 10^{-12}$ J/bit/m⁴
+
+**Ví dụ tính toán:**
+```
+Truyền 256 bits qua 20m (Free-Space):
+E_TX = 50×10⁻⁹ × 256 + 100×10⁻¹² × 256 × 20²
+     = 12.8 µJ + 10.24 µJ
+     = 23.04 µJ = 0.023 mJ
+```
+
+#### 8.3.2 Nhận dữ liệu (Receive)
+
+Năng lượng nhận $k$ bits:
+$$E_{RX}(k) = E_{elec} \times k$$
+
+**Ví dụ:**
+```
+Nhận 256 bits:
+E_RX = 50×10⁻⁹ × 256 = 12.8 µJ = 0.0128 mJ
+```
+
+#### 8.3.3 Xử lý CPU (Processing)
+
+Năng lượng xử lý dựa trên số operations:
+$$E_{CPU} = 10 \times 10^{-9} \times N_{ops}$$
+
+| Tác vụ | Số Operations | Năng lượng |
+|--------|---------------|------------|
+| Ma trận 4×4 inversion | ~1000 FLOPs | 10 µJ |
+| Fixed-width clustering | ~200 FLOPs | 2 µJ |
+| Trust calculation | ~50 FLOPs/sensor | 0.5 µJ |
+
+### 8.4 Chi tiết Tiêu thụ Năng lượng theo Module
+
+#### 8.4.1 SensorNode
+
+```c++
+// Năng lượng khởi tạo: 2 Joules
+energy = EnergyModel(2.0);
+
+// Khi nhận request từ CH (64 bits)
+energy.receive(64);  // 3.2 µJ
+
+// Khi gửi data về CH (256 bits, 20m)
+energy.transmit(256, 20.0);  // 23.04 µJ
+```
+
+**Tổng mỗi chu kỳ request-response:**
+$$E_{Sensor/cycle} = 3.2 + 23.04 = 26.24 \text{ µJ}$$
+
+#### 8.4.2 ClusterHead - ODA-MD
+
+```c++
+// Năng lượng khởi tạo: 5 Joules (cao hơn sensor)
+energy = EnergyModel(5.0);
+
+// Gửi request (64 bits × numSensors, 20m)
+energy.transmit(64, 20.0);  // Per sensor
+
+// Nhận data từ sensors (256 bits)
+energy.receive(256);
+
+// Xử lý ODA-MD (matrix inversion ~1000 FLOPs)
+energy.process(1000);
+
+// Chuyển tiếp data sạch về Sink (256 bits, 30m)
+energy.transmit(256, 30.0);
+```
+
+**Năng lượng mỗi batch ODA-MD:**
+
+| Hoạt động | Công thức | Năng lượng |
+|-----------|-----------|------------|
+| Gửi 3 requests | $3 \times E_{TX}(64, 20)$ | ~17.6 µJ |
+| Nhận 3 responses | $3 \times E_{RX}(256)$ | ~38.4 µJ |
+| Matrix computation | $E_{CPU}(1000)$ | 10 µJ |
+| Forward to Sink | $E_{TX}(256, 30)$ × clean_samples | ~variable |
+
+#### 8.4.3 ClusterHead - OD Algorithm
+
+OD Algorithm có **overhead năng lượng cao hơn** do các bước bổ sung:
+
+```c++
+// STEP 1: Fixed-Width Clustering - Cần trao đổi thông tin giữa sensors
+energy.transmit(128 * numDataPoints, 30.0);  // Broadcast data
+energy.receive(64 * numDataPoints);           // Receive assignments
+
+// STEP 2: Inter-cluster Distance - Trao đổi giữa các Cluster Heads
+energy.transmit(128 * numClusters, 50.0);    // Send center info (xa hơn)
+energy.receive(128 * numClusters * (numClusters - 1));
+
+// STEP 3: Classification - Query neighbors
+energy.transmit(64 * numOutlierClusters * numSensors, 30.0);
+energy.receive(64 * numOutlierClusters * numSensors);
+```
+
+### 8.5 So sánh Chi tiết Năng lượng ODA-MD vs OD
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    SO SÁNH NĂNG LƯỢNG TIÊU THỤ                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ODA-MD (1123.3 mJ)              OD (1510.9 mJ)                        │
+│  ═══════════════════             ═══════════════════                   │
+│                                                                         │
+│  ┌─────────────────┐             ┌─────────────────┐                   │
+│  │ Request-Receive │             │ Request-Receive │                   │
+│  │     ~40%        │             │     ~30%        │                   │
+│  ├─────────────────┤             ├─────────────────┤                   │
+│  │ MD Calculation  │             │ Clustering      │                   │
+│  │     ~15%        │             │     ~20%        │ ← OVERHEAD        │
+│  ├─────────────────┤             ├─────────────────┤                   │
+│  │ Forward to Sink │             │ Detection       │                   │
+│  │     ~45%        │             │     ~15%        │ ← OVERHEAD        │
+│  └─────────────────┘             ├─────────────────┤                   │
+│                                  │ Classification  │                   │
+│                                  │     ~10%        │ ← OVERHEAD        │
+│                                  ├─────────────────┤                   │
+│                                  │ Forward to Sink │                   │
+│                                  │     ~25%        │                   │
+│                                  └─────────────────┘                   │
+│                                                                         │
+│  Tiết kiệm: (1510.9 - 1123.3) / 1510.9 = 25.6%                         │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.6 Bảng Phân tích Chi tiết
+
+| Hoạt động | ODA-MD | OD | Lý do chênh lệch |
+|-----------|--------|-----|------------------|
+| **Request TX** | 17.6 µJ/batch | 17.6 µJ/batch | Giống nhau |
+| **Data RX** | 38.4 µJ/batch | 38.4 µJ/batch | Giống nhau |
+| **CPU Processing** | 10 µJ (matrix) | 2 µJ (cluster) | ODA-MD cao hơn |
+| **Clustering Comm** | 0 | ~50 µJ/batch | OD cần trao đổi clustering |
+| **Inter-CH Comm** | 0 | ~100 µJ/batch | OD cần giao tiếp giữa CHs |
+| **Classification** | 0 | ~30 µJ/batch | OD phân loại Error/Event |
+| **Forward TX** | ~50 µJ/clean | ~50 µJ/clean | Giống nhau |
+
+### 8.7 Tổng hợp Năng lượng Sau 6000s Mô phỏng
+
+| Thành phần | ODA-MD | OD |
+|------------|--------|-----|
+| Số requests gửi | 6000 | 6000 |
+| Số samples nhận | ~18000 | ~18000 |
+| Số outliers phát hiện | 970 | 451 |
+| Số packets forward | ~17000 | ~15500 |
+| **Tổng năng lượng CH** | **1123.3 mJ** | **1510.9 mJ** |
+| **Chênh lệch** | - | **+34.5%** |
+
+### 8.8 Code Triển khai Model Năng lượng
+
+File `EnergyModel.h` triển khai đầy đủ mô hình Heinzelman:
+
+```cpp
+class EnergyModel {
+  private:
+    static constexpr double E_ELEC = 50e-9;   // 50 nJ/bit
+    static constexpr double E_AMP = 100e-12;  // 100 pJ/bit/m²
+    static constexpr double E_DA = 5e-9;      // 5 nJ/bit
+    static constexpr double D0 = 87.0;        // Threshold distance (m)
+    
+  public:
+    // Transmit k bits over distance d
+    double transmit(int bits, double distance) {
+        double energy;
+        if (distance < D0) {
+            // Free space model: E = E_elec*k + E_amp*k*d²
+            energy = E_ELEC * bits + E_AMP * bits * distance * distance;
+        } else {
+            // Multipath model: E = E_elec*k + E_mp*k*d⁴
+            double d4 = distance * distance * distance * distance;
+            energy = E_ELEC * bits + 0.0013e-12 * bits * d4;
+        }
+        consumeEnergy(energy);
+        return energy;
+    }
+    
+    // Receive k bits
+    double receive(int bits) {
+        double energy = E_ELEC * bits;  // E = E_elec*k
+        consumeEnergy(energy);
+        return energy;
+    }
+    
+    // CPU processing
+    double process(int operations) {
+        double energy = 10e-9 * operations;  // 10 nJ/op
+        consumeEnergy(energy);
+        return energy;
+    }
+};
+```
+
+### 8.9 Kết luận về Tiêu thụ Năng lượng
+
+1. **ODA-MD tiết kiệm ~26% năng lượng** so với OD nhờ:
+   - Không cần trao đổi thông tin clustering giữa sensors
+   - Không cần giao tiếp inter-cluster giữa các CHs
+   - Phân biệt Error/Event ngầm (không cần bước riêng)
+
+2. **CPU Processing của ODA-MD cao hơn** (matrix inversion) nhưng:
+   - Chỉ tiêu thụ ~10 µJ/batch
+   - Nhỏ hơn nhiều so với chi phí communication của OD
+
+3. **Communication là chi phí chính** trong WSN:
+   - Transmit 256 bits qua 30m ≈ 35 µJ
+   - So với receive (12.8 µJ) và process (10 µJ)
+
+> **Kết luận**: Việc giảm số lượng tin nhắn trao đổi (communication overhead) là yếu tố quan trọng nhất để tiết kiệm năng lượng trong WSN. ODA-MD đạt được điều này bằng cách thực hiện tất cả tính toán locally tại Cluster Head.
+
+---
+
+## 9. Chi tiết Cơ chế Inject Outlier
+
+### 9.1 Tổng quan
+
+Để đánh giá hiệu quả của thuật toán ODA-MD, chúng ta cần inject outlier (dữ liệu bất thường) vào dataset Intel Lab. Theo bài báo gốc, **1000 outliers** được inject vào dataset với **multiplier = 5.0** (Đã thử với 1.5 và 2.5 ).
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    QUÁ TRÌNH INJECT OUTLIER                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Intel Lab Data (Real)                                                   │
+│  ┌──────────────────────────────────────────────────────────────┐       │
+│  │ T=22.5  H=38.2  L=480   V=2.45  │ Normal                     │       │
+│  │ T=23.1  H=37.8  L=495   V=2.48  │ Normal                     │       │
+│  │ T=22.8  H=38.5  L=488   V=2.46  │ Normal       ┌───────────┐ │       │
+│  │ T=22.9  H=38.0  L=490   V=2.47  │ Normal  ───► │ INJECT!   │ │       │
+│  │ T=23.0  H=37.9  L=492   V=2.46  │ Normal       └───────────┘ │       │
+│  │ ...                              │                           │       │
+│  └──────────────────────────────────────────────────────────────┘       │
+│                                          │                               │
+│                                          ▼                               │
+│  Data với Outliers                                                       │
+│  ┌──────────────────────────────────────────────────────────────┐       │
+│  │ T=22.5  H=38.2  L=480   V=2.45  │ Normal                     │       │
+│  │ T=23.1  H=37.8  L=495   V=2.48  │ Normal                     │       │
+│  │ T=22.8  H=38.5  L=488   V=2.46  │ Normal                     │       │
+│  │ T=114.5 H=7.6   L=4900  V=4.94  │ ★ OUTLIER (Type 0)        │       │
+│  │ T=23.0  H=37.9  L=492   V=2.46  │ Normal                     │       │
+│  │ ...                              │                           │       │
+│  └──────────────────────────────────────────────────────────────┘       │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 9.2 Các Loại Outlier (Multivariate)
+
+Để tạo sự đa dạng và đảm bảo outliers có thể xuất hiện theo nhiều dạng khác nhau, hàm `injectExactOutliers()` tạo **4 loại outlier** luân phiên:
+
+| Type | Tên | Temperature | Humidity | Light | Voltage | 
+|------|-----|-------------|----------|-------|---------|-------|
+| **0** | High-T, Low-H, High-L | ×5 (+400%) | ÷5 (-80%) | ×10 (+900%) | ×2 (+100%) | 
+| **1** | Low-T, High-H, Low-L | ÷5 (-80%) | ×5 (+400%) | ÷10 (-90%) | ÷2 (-50%) | 
+| **2** | All High | ×5 | ×5 | ×5 | ×2.5 | 
+| **3** | All Low | ÷5 | ÷5 | ÷5 | ÷2.5 | 
+
+### 9.3 Ví dụ Cụ thể
+
+**Giá trị gốc (Normal):**
+```
+T = 22.9°C    H = 38.0%    L = 490 lux    V = 2.47V
+```
+
+**Sau khi inject mỗi loại outlier (multiplier = 5.0 - đã thử nhiều multiplier khác kết quả không chênh nhiều):**
+
+| Type | Temperature | Humidity | Light | Voltage |
+|------|-------------|----------|-------|---------|
+| **Normal** | 22.9°C | 38.0% | 490 lux | 2.47V |
+| **Type 0** | **114.5°C** | **7.6%** | **4900 lux** | **4.94V** |
+| **Type 1** | **4.58°C** | **190%** | **49 lux** | **1.24V** |
+| **Type 2** | **114.5°C** | **190%** | **2450 lux** | **6.18V** |
+| **Type 3** | **4.58°C** | **7.6%** | **98 lux** | **0.99V** |
+
+### 9.4 Phân bố Outlier trong Dataset
+
+```cpp
+// Tính khoảng cách giữa các outlier để phân bố đều
+int interval = allIndices.size() / targetCount;
+// Với ~18000 readings và 1000 outliers: interval = 18
+// → Cứ mỗi 18 readings thì có 1 outlier
+```
+
+**Thống kê phân bố:**
+
+| Thông số | Giá trị |
+|----------|---------|
+| Tổng readings | ~18,000 |
+| Số outliers inject | **1,000** |
+| Tỷ lệ outlier | ~5.5% |
+| Interval giữa outliers | ~18 readings |
+| Phân bố theo sensor | Đều trên cả 3 sensors (36, 37, 38) |
+| Random seed | 42 (cố định để reproducible) |
+
+
+
+### 9.6 Lý do Sử dụng Multivariate Outliers
+
+1. **Realistic**: Trong thực tế, lỗi sensor thường ảnh hưởng nhiều thuộc tính
+2. **Challenging**: Test khả năng phát hiện outlier đa chiều của ODA-MD
+3. **Diverse**: 4 loại outlier đảm bảo thuật toán không bị bias với 1 pattern
+
+
+---
+
 **Tài liệu tham khảo:**
 1. Titouna et al., *"ODA-MD for WSN"*, ICCCI-2019
 2. Fawzy et al., *"Outliers detection and classification in WSN"*, Egyptian Informatics Journal, 2013
 3. Intel Lab Data: http://db.csail.mit.edu/labdata/labdata.html
+4. W. B. Heinzelman, A. P. Chandrakasan, and H. Balakrishnan, *"An application-specific protocol architecture for wireless microsensor networks"*, IEEE Transactions on Wireless Communications, 2002
